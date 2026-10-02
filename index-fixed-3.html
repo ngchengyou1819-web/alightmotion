@@ -1,0 +1,1585 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a0b0f">
+<title>Vector Puppet — Pixel-Preserved Body Parts</title>
+
+<!--
+  The important difference from the previous build:
+  NO synthetic/fake body geometry is generated.
+
+  BodyPix's 24-class person-part segmentation supplies the masks.
+  The original uploaded image is embedded ONCE and reused by each layer.
+  Each layer gets its own pixel mask, so the visible artwork remains the
+  same source picture while body parts become independently transformable.
+-->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix@2.2.1/dist/body-pix.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.2/dist/jszip.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js" crossorigin="anonymous"></script>
+
+<style>
+:root{
+  --bg:#090a0e;--panel:#11131a;--panel2:#171923;--panel3:#1f222c;
+  --line:rgba(255,255,255,.075);--line2:rgba(255,255,255,.14);
+  --text:#f2f1ea;--muted:#9a98a4;--dim:#65636f;--accent:#caff62;
+  --blue:#168fff;--danger:#ff7777;--warn:#edbd6f;
+  --top:59px;--time:72px;--dock:69px;--shadow:0 25px 90px rgba(0,0,0,.5)
+}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;background:var(--bg);color:var(--text);
+font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+-webkit-font-smoothing:antialiased}
+body{overflow:hidden}
+button,input,select{font:inherit}button{color:inherit}
+.app{height:100dvh;min-height:580px;display:grid;grid-template-rows:var(--top) 1fr var(--time) var(--dock)}
+.topbar{display:flex;align-items:center;gap:9px;padding:0 10px;background:rgba(9,10,14,.9);
+border-bottom:1px solid var(--line);backdrop-filter:blur(20px);z-index:30}
+.logo{width:31px;height:31px;border-radius:10px;background:var(--accent);color:#0a0b0d;
+display:grid;place-items:center;font-weight:950;font-size:14px}
+.brand{min-width:155px;display:flex;align-items:center;gap:8px}
+.brand strong{display:block;font-size:11px}.brand small{display:block;color:var(--dim);font-size:8px;text-transform:uppercase;letter-spacing:.12em;margin-top:2px}
+.title{flex:1;display:flex;justify-content:center}.title input{width:min(280px,45vw);background:#11131a;border:1px solid var(--line);border-radius:10px;
+padding:8px 10px;text-align:center;color:var(--text);font-size:10px;font-weight:850}
+.top-actions{display:flex;align-items:center;gap:5px}.btn{height:34px;padding:0 10px;border:1px solid var(--line2);
+border-radius:10px;background:#15171f;cursor:pointer;font-size:9px;font-weight:950;white-space:nowrap}
+.btn.primary{background:var(--accent);border-color:transparent;color:#090a0d}
+.btn:disabled{opacity:.45;cursor:not-allowed}.status{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:8px;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:#555}.dot.ok{background:var(--accent);box-shadow:0 0 10px rgba(202,255,98,.6)}
+.dot.busy{background:var(--warn);animation:pulse 1s infinite}.dot.err{background:var(--danger)}@keyframes pulse{50%{opacity:.3}}
+
+.main{min-height:0;display:grid;grid-template-columns:245px minmax(0,1fr) 275px}
+.panel{min-height:0;overflow:auto;background:rgba(17,19,26,.9);scrollbar-width:thin}
+.left{border-right:1px solid var(--line)}.right{border-left:1px solid var(--line)}
+.section{padding:12px;border-bottom:1px solid var(--line)}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.label{font-size:8.5px;color:var(--dim);font-weight:950;letter-spacing:.16em;text-transform:uppercase}
+.mini{width:28px;height:28px;border:1px solid var(--line2);border-radius:8px;background:#15171f;cursor:pointer;font-weight:950}
+.layers{display:flex;flex-direction:column;gap:5px}
+.row{display:grid;grid-template-columns:26px minmax(0,1fr) 25px;align-items:center;gap:7px;padding:8px;border:1px solid transparent;border-radius:11px;cursor:pointer}
+.row:hover{background:#171921}.row.selected{background:#20232d;border-color:var(--line2)}.row.group{background:#171921;border-color:var(--line2)}
+.swatch{width:25px;height:25px;border-radius:8px;background:#222;border:1px solid rgba(255,255,255,.11)}
+.row-title{font-size:9.5px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row-sub{font-size:7.5px;color:var(--dim);margin-top:2px}
+.eye{background:transparent;color:#6a6872;cursor:pointer}.eye.on{color:#eee}
+.badge{display:inline-flex;margin-left:4px;padding:3px 5px;border-radius:999px;background:rgba(202,255,98,.11);
+color:var(--accent);font-size:7px;font-weight:950}
+.help{font-size:9px;color:var(--muted);line-height:1.55}.help b{color:#fff}
+
+.workspace{min-width:0;min-height:0;position:relative;overflow:hidden;
+background:
+linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),
+linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px),
+radial-gradient(circle at 50% 43%,rgba(255,255,255,.03),transparent 48%),#0a0b0f;
+background-size:32px 32px,32px 32px,auto,auto}
+.stage{position:absolute;inset:10px;border:1px solid var(--line);border-radius:22px;background:#07080c;
+overflow:hidden;display:grid;place-items:center;box-shadow:var(--shadow)}
+.stage-grid{position:absolute;inset:0;background:
+linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),
+linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px);
+background-size:36px 36px;pointer-events:none}
+.stage-controls{position:absolute;top:9px;left:50%;transform:translateX(-50%);z-index:20;
+display:flex;gap:4px;padding:4px;border:1px solid var(--line);border-radius:12px;background:rgba(15,16,22,.84);
+backdrop-filter:blur(14px);max-width:94%;overflow:auto}
+.stage-btn{border:0;background:transparent;color:#85838e;border-radius:8px;padding:7px 8px;cursor:pointer;font-size:8.5px;font-weight:950;white-space:nowrap}
+.stage-btn.active{background:#252832;color:#fff}.stage-btn.trace{color:var(--accent)}
+.stage-info{position:absolute;z-index:20;left:11px;top:10px;display:flex;gap:5px}
+.stage-right{position:absolute;right:10px;top:10px;z-index:20}
+.pill{padding:5px 7px;border-radius:999px;background:rgba(0,0,0,.42);border:1px solid var(--line);
+color:#b8b6bf;font-size:7.5px;font-weight:950;backdrop-filter:blur(10px)}
+.stage-body{position:absolute;inset:47px 10px 10px;display:grid;place-items:center}
+#vectorSvg{display:block;max-width:100%;max-height:100%;width:auto;height:auto;overflow:visible;transform-origin:center}
+#originalCanvas{display:none;max-width:100%;max-height:100%;object-fit:contain;transform-origin:center}
+.stage.original #originalCanvas{display:block}.stage.original #vectorSvg{display:none}
+.stage.empty .stage-body{display:none}
+.empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:30px}
+.stage:not(.empty) .empty{display:none}
+.empty-box{max-width:460px}
+.eyebrow{font-size:8px;color:var(--accent);font-weight:950;letter-spacing:.18em;text-transform:uppercase}
+.empty-box h1{font:600 clamp(34px,5vw,58px)/.9 Georgia,serif;letter-spacing:-.06em;margin:12px 0}
+.empty-box p{font-size:10.5px;line-height:1.6;color:var(--muted);margin:0}
+.drop{margin:18px auto 0;border:1px dashed rgba(202,255,98,.35);background:rgba(202,255,98,.025);border-radius:15px;padding:11px}
+.drop button{width:100%;height:43px;background:var(--accent);border:0;border-radius:10px;color:#090a0d;font-size:10px;font-weight:950;cursor:pointer}
+.drop small{display:block;color:var(--dim);font-size:7.5px;margin-top:7px}
+
+.inspect-head{padding:13px;border-bottom:1px solid var(--line)}
+.sel-name{font-size:12px;font-weight:950}.sel-sub{font-size:7.5px;color:var(--dim);letter-spacing:.14em;text-transform:uppercase;margin-top:3px}
+.inspector{padding:12px}
+.action{padding:10px;border-radius:12px;border:1px solid rgba(202,255,98,.16);background:rgba(202,255,98,.035)}
+.action-title{font-size:9.5px;font-weight:950}.action-copy{font-size:8px;line-height:1.5;color:var(--muted);margin-top:4px}
+.action button{width:100%;height:37px;margin-top:8px;border:0;border-radius:10px;background:var(--accent);color:#090a0d;font-size:8.5px;font-weight:950;cursor:pointer}
+.field{margin-top:11px}.field-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px}
+.field-label{font-size:8px;color:var(--muted);font-weight:950;text-transform:uppercase;letter-spacing:.13em}
+.value{font-size:8.5px;color:var(--accent);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--accent)}input[type=color]{width:100%;height:34px;border:1px solid var(--line2);border-radius:9px;background:#111219;padding:2px}
+select{width:100%;height:34px;border:1px solid var(--line2);border-radius:9px;background:#15171f;color:#fff;padding:0 8px;font-size:9px;font-weight:850}
+.hidden{display:none!important}
+
+.timeline{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px;padding:6px 10px;background:#0d0f14;border-top:1px solid var(--line);z-index:25}
+.transport{display:flex;gap:4px}.transport button{width:35px;height:35px;border:1px solid var(--line2);border-radius:9px;background:#15171f;cursor:pointer;font-size:11px}
+.transport .play{background:var(--accent);color:#090a0d;border-color:transparent}
+.timeline-top{display:flex;justify-content:space-between;gap:8px}.time{font-size:8px;color:#aaa8b1}.track{position:relative;height:14px}.line{position:absolute;left:0;right:0;top:6px;height:2px;background:#262932}.head{position:absolute;top:1px;width:2px;height:12px;background:var(--accent)}
+.timeline input{width:100%}
+
+.dock{display:flex;justify-content:center;align-items:center;gap:3px;padding:5px 6px calc(5px + env(safe-area-inset-bottom));
+background:#0c0e13;border-top:1px solid var(--line);z-index:25}
+.dock button{min-width:65px;height:48px;border:0;border-radius:10px;background:transparent;color:#6f6d77;cursor:pointer;
+font-size:7px;font-weight:950;text-transform:uppercase;letter-spacing:.1em;display:flex;flex-direction:column;gap:3px;align-items:center;justify-content:center}
+.dock .icon{font-size:15px}.dock button.active{background:#20232d;color:#fff}.dock button.active .icon{color:var(--accent)}
+.dock .export{background:var(--accent);color:#090a0d}.dock .export .icon{color:#090a0d}
+
+.modal{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.7);display:none;place-items:center;padding:16px}
+.modal.show{display:grid}.modal-box{width:min(600px,100%);max-height:88dvh;overflow:auto;background:#12141b;border:1px solid var(--line2);border-radius:20px;box-shadow:var(--shadow)}
+.modal-head,.modal-foot{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px;border-bottom:1px solid var(--line)}
+.modal-foot{border-top:1px solid var(--line);border-bottom:0;justify-content:flex-end}.modal-title{font-size:12px;font-weight:950}.modal-sub{font-size:8px;color:var(--muted);margin-top:3px}
+.modal-body{padding:13px}.export-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px 11px;border:1px solid var(--line);background:#171921;border-radius:11px;margin-bottom:6px}
+.export-row b{font-size:9px}.export-row p{font-size:7.5px;color:var(--muted);line-height:1.45;margin:3px 0 0}
+.issue{margin-top:6px;padding:8px;border-radius:10px;border:1px solid rgba(239,189,105,.2);background:#171920}.issue b{font-size:8px}.issue div{font-size:7.5px;color:var(--muted);margin-top:3px;line-height:1.4}
+
+.sheet-backdrop{display:none;position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.65)}
+.sheet-backdrop.show{display:block}.sheet{position:absolute;left:0;right:0;bottom:0;max-height:84dvh;background:#12141b;border-radius:23px 23px 0 0;
+transform:translateY(102%);transition:.22s;border-top:1px solid var(--line2);overflow:hidden}
+.sheet-backdrop.show .sheet{transform:translateY(0)}.handle{width:45px;height:4px;border-radius:4px;background:#383a44;margin:9px auto}
+.sheet-head{display:flex;align-items:center;justify-content:space-between;padding:9px 13px;border-bottom:1px solid var(--line)}
+.sheet-body{max-height:calc(84dvh - 48px);overflow:auto;padding:11px}
+
+.toast{position:fixed;left:50%;bottom:calc(var(--dock) + var(--time) + 13px);transform:translate(-50%,10px);opacity:0;pointer-events:none;z-index:120;
+background:#efeee8;color:#0a0b0e;border-radius:11px;padding:9px 12px;font-size:8.5px;font-weight:950;box-shadow:var(--shadow);transition:.2s;text-align:center;max-width:88vw}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+
+@media(max-width:1020px){.main{grid-template-columns:215px minmax(0,1fr) 255px}.brand{min-width:150px}}
+@media(max-width:860px){
+  :root{--top:57px;--time:61px;--dock:70px}
+  .app{min-height:0}.main{display:block}.panel{display:none}.title{display:none}.brand{min-width:32px}.brand-copy{display:none}
+  .status{margin-left:auto}.top-actions .desktop{display:none}
+  .stage{inset:7px}.stage-body{inset:45px 7px 7px}.dock{justify-content:flex-start;overflow:auto}.dock button{min-width:60px}
+}
+@media(max-width:520px){
+  .topbar{padding:0 7px}.btn{padding:0 8px}.stage-controls{max-width:93%}.stage-btn{padding:7px 7px}
+  .timeline{gap:6px;padding:6px 7px}.transport button{width:33px;height:33px}.dock button{min-width:57px}
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">V</div>
+    <div class="brand-copy">
+      <strong>Vector Puppet</strong>
+      <small>pixel-preserved part rig</small>
+    </div>
+  </div>
+
+  <div class="title">
+    <input id="projectTitle" value="Untitled Character" aria-label="Project title">
+  </div>
+
+  <div class="top-actions">
+    <div class="status"><span class="dot" id="dot"></span><span id="status">Ready</span></div>
+    <button class="btn desktop" id="openBtn">Open</button>
+    <button class="btn" id="uploadBtn">＋ Upload</button>
+    <button class="btn primary" id="exportBtn">Export</button>
+  </div>
+</header>
+
+<main class="main">
+  <aside class="panel left">
+    <section class="section">
+      <div class="section-head">
+        <div class="label">Layer tree</div>
+        <div style="display:flex;gap:4px">
+          <button class="mini" id="ungroupSide" title="Ungroup">↘</button>
+          <button class="mini" id="deleteSide" title="Delete">×</button>
+        </div>
+      </div>
+      <div class="layers" id="layerList"></div>
+    </section>
+    <section class="section">
+      <div class="label">What changed</div>
+      <div class="help" style="margin-top:7px">
+        The uploaded image is <b>never redrawn as fake shapes</b>.
+        Each part is the original image clipped by a real segmentation mask.
+        That means the artwork keeps its lines, colors, hair, clothing and details.
+      </div>
+    </section>
+  </aside>
+
+  <section class="workspace">
+    <div class="stage empty" id="stage">
+      <div class="stage-grid"></div>
+
+      <div class="stage-info">
+        <div class="pill" id="modePill">ORIGINAL</div>
+        <div class="pill" id="selPill">CHARACTER GROUP</div>
+      </div>
+
+      <div class="stage-right">
+        <div class="pill">Zoom <span id="zoomLabel">100%</span>
+          <button id="zoomOut" style="border:0;background:none;color:#fff;cursor:pointer;font-weight:950">−</button>
+          <button id="zoomIn" style="border:0;background:none;color:#fff;cursor:pointer;font-weight:950">+</button>
+        </div>
+      </div>
+
+      <div class="stage-controls">
+        <button class="stage-btn active" data-view="original">Original</button>
+        <button class="stage-btn" data-view="separated">Separated</button>
+        <button class="stage-btn" data-action="fit">Fit</button>
+        <button class="stage-btn trace" id="stageTrace">✦ Separate Parts</button>
+      </div>
+
+      <div class="stage-body">
+        <canvas id="originalCanvas"></canvas>
+        <svg id="vectorSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+
+      <div class="empty">
+        <div class="empty-box">
+          <div class="eyebrow">Keep the picture · split the layers</div>
+          <h1>Same image.<br>Separate pieces.</h1>
+          <p>
+            Body-part segmentation creates masks from the actual uploaded pixels.
+            The first result is a collapsed Character group; ungroup it to reveal
+            every detected part as its own animation layer.
+          </p>
+          <div class="drop" id="dropBox">
+            <button id="chooseBtn">Choose an image</button>
+            <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+            <small>PNG · JPG · WEBP · max 15 MB · one person works best</small>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="panel right">
+    <div class="inspect-head">
+      <div class="sel-name" id="selectedName">Character Group</div>
+      <div class="sel-sub" id="selectedSub">GROUP · 0 PARTS</div>
+    </div>
+
+    <div class="inspector">
+      <div id="groupPanel">
+        <div class="action">
+          <div class="action-title">Character</div>
+          <div class="action-copy">
+            Everything is kept together first. Nothing is changed visually.
+            Ungroup when you're ready to animate the individual body parts.
+          </div>
+          <button id="ungroupBtn">UNGROUP · SHOW INDIVIDUAL PARTS</button>
+        </div>
+        <div class="field">
+          <div class="field-head"><span class="field-label">Detected</span><span class="value" id="detectedCount">0</span></div>
+        </div>
+        <div id="groupParts"></div>
+      </div>
+
+      <div id="partPanel" class="hidden">
+        <div class="action">
+          <div class="action-title" id="partTitle">Part</div>
+          <div class="action-copy" id="partCopy">Original pixels, clipped to this body-part mask.</div>
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="field-label">X</span><span class="value" id="xValue">0</span></div>
+          <input id="x" type="range" min="-500" max="500" value="0">
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="field-label">Y</span><span class="value" id="yValue">0</span></div>
+          <input id="y" type="range" min="-500" max="500" value="0">
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="field-label">Rotation</span><span class="value" id="rValue">0°</span></div>
+          <input id="rotation" type="range" min="-180" max="180" value="0">
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="field-label">Scale</span><span class="value" id="scaleValue">100%</span></div>
+          <input id="scale" type="range" min=".4" max="2.2" step=".01" value="1">
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="field-label">Opacity</span><span class="value" id="partOpacityValue">100%</span></div>
+          <input id="partOpacity" type="range" min="0" max="1" step=".01" value="1">
+        </div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<footer class="timeline">
+  <div class="transport">
+    <button id="prevBtn">◀</button>
+    <button id="playBtn" class="play">▶</button>
+    <button id="nextBtn">▶</button>
+  </div>
+  <div>
+    <div class="timeline-top">
+      <span class="time" id="timeReadout">00:00:000</span>
+      <span class="time" id="trackReadout">Character Group · 0 parts</span>
+    </div>
+    <div class="track">
+      <div class="line"></div>
+      <div class="head" id="playhead"></div>
+    </div>
+    <input type="range" id="timeline" min="0" max="120" value="0">
+  </div>
+</footer>
+
+<nav class="dock">
+  <button class="active" data-mode="trace"><span class="icon">✦</span>Trace</button>
+  <button data-mode="layers"><span class="icon">☷</span>Layers</button>
+  <button data-mode="pose"><span class="icon">◇</span>Pose</button>
+  <button data-mode="style"><span class="icon">◒</span>Style</button>
+  <button class="export" data-mode="export"><span class="icon">↑</span>Export</button>
+</nav>
+</div>
+
+<div class="sheet-backdrop" id="sheetBackdrop">
+  <div class="sheet">
+    <div class="handle"></div>
+    <div class="sheet-head">
+      <strong id="sheetTitle" style="font-size:10px">Layers</strong>
+      <button class="mini" id="closeSheet">×</button>
+    </div>
+    <div class="sheet-body" id="sheetBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="exportModal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">Export</div>
+        <div class="modal-sub">The original picture is embedded once and each part keeps its own mask.</div>
+      </div>
+      <button class="mini" id="closeExport">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="export-row">
+        <div><b>SVG — separated image layers</b><p>One source image, independent body-part masks and transforms.</p></div>
+        <button class="btn primary" id="exportSvg">Download</button>
+      </div>
+      <div class="export-row">
+        <div><b>HVP — editable character package</b><p>Preserves source pixels, masks, group state and transforms.</p></div>
+        <button class="btn" id="exportHvp">Download</button>
+      </div>
+      <div class="export-row">
+        <div><b>Alight Motion XML</b><p>Best-effort compatibility export. The exact AM import format is version-dependent.</p></div>
+        <button class="btn" id="exportXml">Download</button>
+      </div>
+      <div id="exportIssues"></div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="closeExport2">Close</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+"use strict";
+
+const $=id=>document.getElementById(id);
+const CONFIG={
+  maxBytes:15*1024*1024,
+  maxW:8192,maxH:8192,maxPixels:8192*8192,
+  traceMax:768,fps:30,duration:120,
+  version:22,appVersion:"2.2.0"
+};
+
+const PARTS={
+  left_upper_arm_front:[2],
+  left_upper_arm_back:[3],
+  right_upper_arm_front:[4],
+  right_upper_arm_back:[5],
+  left_lower_arm_front:[6],
+  left_lower_arm_back:[7],
+  right_lower_arm_front:[8],
+  right_lower_arm_back:[9],
+  left_hand:[10],
+  right_hand:[11],
+  torso_front:[12],
+  torso_back:[13],
+  left_upper_leg_front:[14],
+  left_upper_leg_back:[15],
+  right_upper_leg_front:[16],
+  right_upper_leg_back:[17],
+  left_lower_leg_front:[18],
+  left_lower_leg_back:[19],
+  right_lower_leg_front:[20],
+  right_lower_leg_back:[21],
+  left_foot:[22],
+  right_foot:[23],
+  left_face:[0],
+  right_face:[1]
+};
+
+const LABEL={
+  left_upper_arm:"Left Upper Arm",
+  right_upper_arm:"Right Upper Arm",
+  left_forearm:"Left Forearm",
+  right_forearm:"Right Forearm",
+  left_hand:"Left Hand",
+  right_hand:"Right Hand",
+  torso:"Torso",
+  left_upper_leg:"Left Upper Leg",
+  right_upper_leg:"Right Upper Leg",
+  left_lower_leg:"Left Lower Leg",
+  right_lower_leg:"Right Lower Leg",
+  left_foot:"Left Foot",
+  right_foot:"Right Foot",
+  head:"Head / Face",
+  hair:"Hair",
+  left_eye:"Left Eye",
+  right_eye:"Right Eye",
+  mouth:"Mouth",
+  left_brow:"Left Brow",
+  right_brow:"Right Brow",
+  neck:"Neck"
+};
+
+const UI={
+  file:$("fileInput"),choose:$("chooseBtn"),upload:$("uploadBtn"),
+  trace:$("stageTrace"),stageTrace:$("stageTrace"),stage:$("stage"),dropBox:$("dropBox"),
+  originalCanvas:$("originalCanvas"),svg:$("vectorSvg"),
+  title:$("projectTitle"),dot:$("dot"),status:$("status"),
+  layerList:$("layerList"),selectedName:$("selectedName"),
+  selectedSub:$("selectedSub"),groupPanel:$("groupPanel"),
+  partPanel:$("partPanel"),ungroup:$("ungroupBtn"),
+  ungroupSide:$("ungroupSide"),deleteSide:$("deleteSide"),
+  detected:$("detectedCount"),groupParts:$("groupParts"),
+  partTitle:$("partTitle"),partCopy:$("partCopy"),
+  x:$("x"),y:$("y"),r:$("rotation"),scale:$("scale"),opacity:$("partOpacity"),
+  xVal:$("xValue"),yVal:$("yValue"),rVal:$("rValue"),scaleVal:$("scaleValue"),opVal:$("partOpacityValue"),
+  timeline:$("timeline"),time:$("timeReadout"),playhead:$("playhead"),track:$("trackReadout"),
+  prev:$("prevBtn"),play:$("playBtn"),next:$("nextBtn"),
+  modePill:$("modePill"),selPill:$("selPill"),zoomLabel:$("zoomLabel"),zoomIn:$("zoomIn"),zoomOut:$("zoomOut"),
+  open:$("openBtn"),export:$("exportBtn"),modal:$("exportModal"),closeExport:$("closeExport"),
+  closeExport2:$("closeExport2"),exportSvg:$("exportSvg"),exportHvp:$("exportHvp"),exportXml:$("exportXml"),
+  exportIssues:$("exportIssues"),toast:$("toast"),sheet:$("sheetBackdrop"),sheetTitle:$("sheetTitle"),
+  sheetBody:$("sheetBody"),closeSheet:$("closeSheet")
+};
+
+let sourceImage=null,sourceBlob=null,sourceDataUrl="";
+let bodyModel=null,bodyLoading=null,faceMesh=null,faceLoading=null;
+let zoom=1,view="original",playing=false,playLast=performance.now(),toastTimer=null;
+let history=[],historyIndex=-1,activeSheet="layers";
+
+const state={project:createProject()};
+
+function createProject(){
+  return {
+    format:"HVP",
+    version:CONFIG.version,
+    metadata:{id:crypto.randomUUID(),title:"Untitled Character",appVersion:CONFIG.appVersion},
+    canvas:{width:1080,height:1080},
+    fps:CONFIG.fps,durationFrames:CONFIG.duration,currentFrame:0,
+    source:null,
+    groups:[],
+    layers:[],
+    face:{smile:0,jawOpen:0,blinkLeft:0,blinkRight:0,headTilt:0},
+    animation:{keyframes:[]}
+  };
+}
+
+function clone(v){return JSON.parse(JSON.stringify(v))}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function rad(d){return d*Math.PI/180}
+function fmt(v){return Number(Number(v||0).toFixed(4)).toString()}
+function esc(v){
+  return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&apos;");
+}
+function safeName(v){return String(v||"character").replace(/[^a-zA-Z0-9._-]+/g,"-").replace(/-+/g,"-").slice(0,80)||"character"}
+function color6(v){return /^#[0-9a-fA-F]{6}$/.test(String(v||""))?v:"#ffffff"}
+
+function setStatus(text,kind=""){
+  UI.status.textContent=text;
+  UI.dot.className="dot"+(kind?" "+kind:"");
+}
+function toast(text){
+  clearTimeout(toastTimer);
+  UI.toast.textContent=text;UI.toast.classList.add("show");
+  toastTimer=setTimeout(()=>UI.toast.classList.remove("show"),2500);
+}
+
+function setStyle(el,prop,value){
+  if(el && el.style) el.style[prop]=value;
+}
+function download(blob,name){
+  const url=URL.createObjectURL(blob),a=document.createElement("a");
+  a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1400);
+}
+
+function selectedLayer(){
+  if(state.project.__selectedType!=="layer")return null;
+  return state.project.layers.find(l=>l.id===state.project.__selectedId)||null;
+}
+function selectedGroup(){
+  if(state.project.__selectedType!=="group")return null;
+  return state.project.groups.find(g=>g.id===state.project.__selectedId)||null;
+}
+function selectGroup(id){
+  state.project.__selectedType="group";
+  state.project.__selectedId=id||state.project.groups[0]?.id||null;
+}
+function selectLayer(id){
+  state.project.__selectedType="layer";
+  state.project.__selectedId=id;
+}
+function snapshot(){
+  const p=clone(state.project);
+  delete p.__selectedType;delete p.__selectedId;
+  return p;
+}
+function pushHistory(){
+  history=history.slice(0,historyIndex+1);
+  history.push(snapshot());
+  if(history.length>35)history.shift();
+  historyIndex=history.length-1;
+}
+function restoreHistory(p){
+  state.project=clone(p);
+  state.project.__selectedType="group";
+  state.project.__selectedId=state.project.groups?.[0]?.id||null;
+  UI.title.value=state.project.metadata?.title||"Untitled Character";
+  renderAll();
+}
+
+function validateFile(file){
+  if(!file)throw new Error("No image selected.");
+  if(file.size>CONFIG.maxBytes)throw new Error("Image exceeds the 15 MB limit.");
+  if(!["image/png","image/jpeg","image/webp"].includes(file.type))throw new Error("Use PNG, JPG or WEBP.");
+}
+
+async function readDataUrl(file){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(String(r.result));
+    r.onerror=()=>reject(new Error("Could not read the image."));
+    r.readAsDataURL(file);
+  });
+}
+
+async function loadImage(file){
+  validateFile(file);
+  const dataUrl=await readDataUrl(file);
+  const img=new Image();
+  img.decoding="async";
+  img.src=dataUrl;
+  await img.decode();
+  if(!img.naturalWidth||!img.naturalHeight)throw new Error("Image could not be decoded.");
+  if(img.naturalWidth>CONFIG.maxW||img.naturalHeight>CONFIG.maxH)throw new Error("Image is larger than 8192px.");
+  if(img.naturalWidth*img.naturalHeight>CONFIG.maxPixels)throw new Error("Image contains too many pixels.");
+
+  sourceImage=img;sourceBlob=file;sourceDataUrl=dataUrl;
+  state.project=createProject();
+  state.project.metadata.title=file.name.replace(/\.[^/.]+$/,"")||"Untitled Character";
+  state.project.canvas.width=img.naturalWidth;state.project.canvas.height=img.naturalHeight;
+  state.project.source={name:file.name,type:file.type,size:file.size,width:img.naturalWidth,height:img.naturalHeight};
+
+  UI.title.value=state.project.metadata.title;
+  UI.stage.classList.remove("empty");
+  UI.originalCanvas.width=img.naturalWidth;UI.originalCanvas.height=img.naturalHeight;
+  UI.originalCanvas.getContext("2d").drawImage(img,0,0);
+  view="original";
+  history=[];historyIndex=-1;pushHistory();
+  selectGroup(null);
+
+  // Always show the exact uploaded source immediately.
+  view="original";
+  UI.stage.classList.remove("empty");
+  UI.stage.classList.add("original");
+  UI.originalCanvas.style.display="block";
+  UI.svg.style.display="none";
+
+  renderAll();
+  setStatus("Image ready","ok");
+  toast("Image loaded. Tap Separate Parts.");
+}
+
+async function loadExternalScript(url, test, timeout=20000){
+  if(test()) return true;
+  return new Promise((resolve,reject)=>{
+    const script=document.createElement("script");
+    let done=false;
+    const finish=(ok,err)=>{
+      if(done)return;
+      done=true;
+      clearTimeout(timer);
+      script.onload=null;script.onerror=null;
+      ok?resolve(true):reject(err||new Error("Could not load " + url));
+    };
+    const timer=setTimeout(()=>finish(false,new Error("Timed out loading " + url)),timeout);
+    script.src=url;
+    script.async=false;
+    script.crossOrigin="anonymous";
+    script.onload=()=>test()?finish(true):finish(false,new Error("Loaded script but its global was unavailable: "+url));
+    script.onerror=()=>finish(false,new Error("Network error loading "+url));
+    document.head.appendChild(script);
+  });
+}
+
+async function ensureBodyModel(){
+  if(bodyModel)return bodyModel;
+  if(bodyLoading)return bodyLoading;
+
+  bodyLoading=(async()=>{
+    // Some Android browsers/file viewers do not reliably execute every remote
+    // script tag in a content:// HTML document. Try the already-declared globals
+    // first, then load the exact published browser bundle dynamically.
+    if(!window.tf){
+      const tfUrls=[
+        "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js",
+        "https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js"
+      ];
+      let loaded=false;
+      for(const url of tfUrls){
+        try{await loadExternalScript(url,()=>!!window.tf);loaded=true;break}catch(e){console.warn(e)}
+      }
+      if(!loaded)throw new Error("TensorFlow.js could not load. This local HTML needs internet access for the AI model.");
+    }
+
+    if(!window.bodyPix){
+      // IMPORTANT: BodyPix 2.2.1 publishes body-pix.min.js, not
+      // body-pix.min.umd.js. Keep two CDNs as a fallback.
+      const bpUrls=[
+        "https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix@2.2.1/dist/body-pix.min.js",
+        "https://unpkg.com/@tensorflow-models/body-pix@2.2.1/dist/body-pix.min.js"
+      ];
+      let loaded=false;
+      for(const url of bpUrls){
+        try{await loadExternalScript(url,()=>!!window.bodyPix);loaded=true;break}catch(e){console.warn(e)}
+      }
+      if(!loaded)throw new Error("BodyPix could not load. Check that Brave is allowing internet access for this HTML file.");
+    }
+
+    setStatus("Starting body-part AI…","busy");
+    await tf.ready();
+
+    // Prefer WebGL on phones; fall back to CPU if WebGL is unavailable.
+    try{
+      if(tf.findBackend && tf.findBackend("webgl")) await tf.setBackend("webgl");
+    }catch(_){
+      try{await tf.setBackend("cpu")}catch(__){}
+    }
+    await tf.ready();
+
+    setStatus("Loading body-part AI…","busy");
+
+    const model=await bodyPix.load({
+      architecture:"MobileNetV1",
+      outputStride:16,
+      multiplier:.75,
+      quantBytes:2
+    });
+
+    if(!model || typeof model.segmentPersonParts!=="function"){
+      throw new Error("BodyPix loaded, but body-part segmentation is unavailable.");
+    }
+
+    bodyModel=model;
+    return model;
+  })().catch(e=>{
+    bodyLoading=null;
+    throw e;
+  });
+
+  return bodyLoading;
+}
+
+async function ensureFaceMesh(){
+  if(faceMesh)return faceMesh;
+  if(faceLoading)return faceLoading;
+  faceLoading=(async()=>{
+    if(!window.FaceMesh)throw new Error("Face Mesh library could not load.");
+    const fm=new FaceMesh({
+      locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}`
+    });
+    fm.setOptions({
+      maxNumFaces:1,refineLandmarks:true,
+      minDetectionConfidence:.45,minTrackingConfidence:.45
+    });
+    let resolver=null;
+    fm.onResults(r=>{
+      if(resolver){const fn=resolver;resolver=null;fn(r)}
+    });
+    fm.sendForImage=image=>new Promise((resolve,reject)=>{
+      resolver=resolve;
+      fm.send({image}).catch(reject);
+    });
+    faceMesh=fm;return fm;
+  })().catch(e=>{faceLoading=null;throw e});
+  return faceLoading;
+}
+
+function makeTraceCanvas(){
+  const scale=Math.min(1,CONFIG.traceMax/Math.max(sourceImage.naturalWidth,sourceImage.naturalHeight));
+  const c=document.createElement("canvas");
+  c.width=Math.max(64,Math.round(sourceImage.naturalWidth*scale));
+  c.height=Math.max(64,Math.round(sourceImage.naturalHeight*scale));
+  c.getContext("2d").drawImage(sourceImage,0,0,c.width,c.height);
+  return {canvas:c,scaleX:sourceImage.naturalWidth/c.width,scaleY:sourceImage.naturalHeight/c.height};
+}
+
+async function getPartSegmentation(){
+  const model=await ensureBodyModel();
+  const t=makeTraceCanvas();
+  const seg=await model.segmentPersonParts(t.canvas,{
+    flipHorizontal:false,
+    internalResolution:"medium",
+    segmentationThreshold:.58
+  });
+  return {
+    width:seg.width,height:seg.height,data:seg.data,
+    scaleX:sourceImage.naturalWidth/seg.width,
+    scaleY:sourceImage.naturalHeight/seg.height
+  };
+}
+
+async function getFaceLandmarks(){
+  try{
+    const t=makeTraceCanvas();
+    const fm=await ensureFaceMesh();
+    const result=await fm.sendForImage(t.canvas);
+    if(!result.multiFaceLandmarks?.length)return null;
+    return result.multiFaceLandmarks[0].map(p=>({
+      x:p.x*t.canvas.width*t.scaleX,
+      y:p.y*t.canvas.height*t.scaleY
+    }));
+  }catch(e){
+    console.warn("Face landmarks unavailable:",e);
+    return null;
+  }
+}
+
+function newMask(w,h){
+  return new Uint8Array(w*h);
+}
+
+function orIds(partData,ids){
+  const mask=new Uint8Array(partData.width*partData.height);
+  const set=new Set(ids);
+  for(let i=0;i<partData.data.length;i++)if(set.has(partData.data[i]))mask[i]=1;
+  return mask;
+}
+
+function orMasks(a,b){
+  for(let i=0;i<a.length;i++)if(b[i])a[i]=1;
+  return a;
+}
+
+function subtractMask(a,b){
+  for(let i=0;i<a.length;i++)if(b[i])a[i]=0;
+  return a;
+}
+
+function countMask(m){
+  let c=0;for(let i=0;i<m.length;i++)c+=m[i]?1:0;return c;
+}
+
+function maskToDataUrl(maskObj,mask,threshold=1){
+  const c=document.createElement("canvas");
+  c.width=maskObj.width;c.height=maskObj.height;
+  const ctx=c.getContext("2d");
+  const image=ctx.createImageData(c.width,c.height);
+  for(let i=0;i<mask.length;i++){
+    const a=mask[i]>=threshold?255:0;
+    const j=i*4;
+    image.data[j]=255;image.data[j+1]=255;image.data[j+2]=255;image.data[j+3]=a;
+  }
+  ctx.putImageData(image,0,0);
+  return {
+    dataUrl:c.toDataURL("image/png"),
+    width:c.width,height:c.height
+  };
+}
+
+function polygonMask(maskObj,points){
+  const mask=new Uint8Array(maskObj.width*maskObj.height);
+  if(!points||points.length<3)return mask;
+  const sx=maskObj.width/sourceImage.naturalWidth;
+  const sy=maskObj.height/sourceImage.naturalHeight;
+  const scaled=points.map(p=>({x:p.x*sx,y:p.y*sy}));
+
+  const c=document.createElement("canvas");
+  c.width=maskObj.width;c.height=maskObj.height;
+  const ctx=c.getContext("2d");
+  ctx.beginPath();
+  ctx.moveTo(scaled[0].x,scaled[0].y);
+  for(let i=1;i<scaled.length;i++)ctx.lineTo(scaled[i].x,scaled[i].y);
+  ctx.closePath();ctx.fillStyle="#fff";ctx.fill();
+  const pixels=ctx.getImageData(0,0,c.width,c.height).data;
+  for(let i=0;i<mask.length;i++)mask[i]=pixels[i*4+3]>20?1:0;
+  return mask;
+}
+
+function box(points){
+  if(!points?.length)return{x:0,y:0,w:0,h:0,cx:0,cy:0};
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for(const p of points){
+    minX=Math.min(minX,p.x);minY=Math.min(minY,p.y);
+    maxX=Math.max(maxX,p.x);maxY=Math.max(maxY,p.y);
+  }
+  return{x:minX,y:minY,w:maxX-minX,h:maxY-minY,cx:(minX+maxX)/2,cy:(minY+maxY)/2};
+}
+
+const FACE_IDS={
+  oval:[10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109],
+  leftEye:[33,160,158,133,153,144],
+  rightEye:[362,385,387,263,373,380],
+  mouth:[61,146,91,181,84,17,314,405,321,375,291,308,78,95],
+  leftBrow:[70,63,105,66,107],
+  rightBrow:[336,296,334,293,300]
+};
+
+function makeLayer(name,type,maskObj,mask,extra={}){
+  const count=countMask(mask);
+  if(count<Math.max(8,mask.length*.0002))return null;
+  const m=maskToDataUrl(maskObj,mask);
+  return {
+    id:crypto.randomUUID(),
+    name,type,
+    visible:true,locked:false,
+    detectedPixels:count,
+    maskDataUrl:m.dataUrl,
+    maskWidth:m.width,maskHeight:m.height,
+    sourceDataUrl,
+    parentGroupId:null,
+    transform:{x:0,y:0,rotation:0,scale:1,opacity:1},
+    keyframes:[],
+    ...extra
+  };
+}
+
+function combinedMaskFor(partSeg,names){
+  const ids=names.flatMap(n=>PARTS[n]||[]);
+  return orIds(partSeg,ids);
+}
+
+function normalizeBodyNames(rawLayerNames){
+  const aliases=[
+    ["Left Upper Arm",["left_upper_arm_front","left_upper_arm_back"]],
+    ["Right Upper Arm",["right_upper_arm_front","right_upper_arm_back"]],
+    ["Left Forearm",["left_lower_arm_front","left_lower_arm_back"]],
+    ["Right Forearm",["right_lower_arm_front","right_lower_arm_back"]],
+    ["Left Hand",["left_hand"]],
+    ["Right Hand",["right_hand"]],
+    ["Torso",["torso_front","torso_back"]],
+    ["Left Upper Leg",["left_upper_leg_front","left_upper_leg_back"]],
+    ["Right Upper Leg",["right_upper_leg_front","right_upper_leg_back"]],
+    ["Left Lower Leg",["left_lower_leg_front","left_lower_leg_back"]],
+    ["Right Lower Leg",["right_lower_leg_front","right_lower_leg_back"]],
+    ["Left Foot",["left_foot"]],
+    ["Right Foot",["right_foot"]]
+  ];
+  return aliases.map(([label,names])=>({label,names}));
+}
+
+function detectHairMask(partSeg,faceMask,landmarks){
+  const mask=new Uint8Array(partSeg.width*partSeg.height);
+  let hb=null;
+  if(landmarks?.length)hb=box(landmarks.map(p=>({x:p.x,y:p.y})));
+  if(!hb){
+    // Only constrain the estimate to the upper section of the person.
+    const person=[];
+    for(let i=0;i<partSeg.data.length;i++){
+      if(partSeg.data[i]>=0){
+        const y=Math.floor(i/partSeg.width);
+        person.push({x:(i%partSeg.width)*partSeg.scaleX,y:y*partSeg.scaleY});
+      }
+    }
+    hb=box(person);
+    hb={x:hb.x+hb.w*.24,y:hb.y,w:hb.w*.52,h:hb.h*.35,cx:hb.cx,cy:hb.cy};
+  }
+  const x0=Math.max(0,Math.floor((hb.x-hb.w*.28)/partSeg.scaleX));
+  const y0=Math.max(0,Math.floor((hb.y-hb.h*.20)/partSeg.scaleY));
+  const x1=Math.min(partSeg.width,Math.ceil((hb.x+hb.w*1.28)/partSeg.scaleX));
+  const y1=Math.min(partSeg.height,Math.ceil((hb.y+hb.h*.75)/partSeg.scaleY));
+
+  for(let y=y0;y<y1;y++){
+    for(let x=x0;x<x1;x++){
+      const i=y*partSeg.width+x;
+      if(partSeg.data[i]>=0 && !faceMask[i])mask[i]=1;
+    }
+  }
+  return mask;
+}
+
+function buildNeckMask(partSeg,landmarks){
+  const mask=new Uint8Array(partSeg.width*partSeg.height);
+  if(!landmarks||landmarks.length<10)return mask;
+  const hb=box(landmarks);
+  const x0=Math.max(0,Math.floor((hb.cx-hb.w*.18)/partSeg.scaleX));
+  const x1=Math.min(partSeg.width,Math.ceil((hb.cx+hb.w*.18)/partSeg.scaleX));
+  const y0=Math.max(0,Math.floor((hb.y+hb.h*.72)/partSeg.scaleY));
+  const y1=Math.min(partSeg.height,Math.ceil((hb.y+hb.h*1.65)/partSeg.scaleY));
+  for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++){
+    const i=y*partSeg.width+x;
+    if(partSeg.data[i]>=0 && !faceMaskGlobal(i))mask[i]=1;
+  }
+  return mask;
+}
+let currentFaceMask=null;
+function faceMaskGlobal(i){return currentFaceMask?currentFaceMask[i]:false}
+
+async function traceParts(){
+  if(!sourceImage){toast("Upload an image first.");return}
+  UI.trace.disabled=true;UI.stageTrace.disabled=true;setStatus("Loading body-part model…","busy");
+
+  try{
+    setStatus("Running body-part segmentation…","busy");
+    const seg=await getPartSegmentation();
+    setStatus("Making pixel masks…","busy");
+
+    currentFaceMask=combinedMaskFor(seg,["left_face","right_face"]);
+    const landmarks=await getFaceLandmarks();
+
+    // If Face Mesh exists, carve its feature regions out of the face base.
+    const eyesMask=new Uint8Array(seg.width*seg.height);
+    const mouthMask=new Uint8Array(seg.width*seg.height);
+    const browsMask=new Uint8Array(seg.width*seg.height);
+
+    let leftEyeLayerMask=null,rightEyeLayerMask=null,mouthLayerMask=null,leftBrowLayerMask=null,rightBrowLayerMask=null;
+
+    if(landmarks){
+      const lm=landmarks;
+      const eyeL=polygonMask(seg,FACE_IDS.leftEye.map(i=>lm[i]).filter(Boolean));
+      const eyeR=polygonMask(seg,FACE_IDS.rightEye.map(i=>lm[i]).filter(Boolean));
+      const mouth=polygonMask(seg,FACE_IDS.mouth.map(i=>lm[i]).filter(Boolean));
+      const browL=polygonMask(seg,FACE_IDS.leftBrow.map(i=>lm[i]).filter(Boolean));
+      const browR=polygonMask(seg,FACE_IDS.rightBrow.map(i=>lm[i]).filter(Boolean));
+
+      leftEyeLayerMask=eyeL;rightEyeLayerMask=eyeR;mouthLayerMask=mouth;
+      leftBrowLayerMask=browL;rightBrowLayerMask=browR;
+
+      orMasks(eyesMask,eyeL);orMasks(eyesMask,eyeR);
+      orMasks(mouthMask,mouth);
+      orMasks(browsMask,browL);orMasks(browsMask,browR);
+
+      subtractMask(currentFaceMask,eyesMask);
+      subtractMask(currentFaceMask,mouthMask);
+      subtractMask(currentFaceMask,browsMask);
+    }
+
+    const layers=[];
+    const bodyParts=normalizeBodyNames();
+    for(const part of bodyParts){
+      let mask=combinedMaskFor(seg,part.names);
+      const l=makeLayer(part.label,part.label.toLowerCase().replaceAll(" ","_"),seg,mask);
+      if(l)layers.push(l);
+    }
+
+    // Face/head and hair use the same source pixels, just different masks.
+    const headLayer=makeLayer("Head / Face","head",seg,currentFaceMask||new Uint8Array(seg.width*seg.height));
+    if(headLayer)layers.push(headLayer);
+
+    const hairMask=detectHairMask(seg,currentFaceMask||new Uint8Array(seg.width*seg.height),landmarks);
+    const hairLayer=makeLayer("Hair","hair",seg,hairMask);
+    if(hairLayer)layers.push(hairLayer);
+
+    if(leftEyeLayerMask){
+      const l=makeLayer("Left Eye","left_eye",seg,leftEyeLayerMask);if(l)layers.push(l);
+      const r=makeLayer("Right Eye","right_eye",seg,rightEyeLayerMask);if(r)layers.push(r);
+      const m=makeLayer("Mouth","mouth",seg,mouthLayerMask);if(m)layers.push(m);
+      const bl=makeLayer("Left Brow","left_brow",seg,leftBrowLayerMask);if(bl)layers.push(bl);
+      const br=makeLayer("Right Brow","right_brow",seg,rightBrowLayerMask);if(br)layers.push(br);
+    }
+
+    // Neck is deliberately derived from person pixels and the actual detected head
+    // region. It is not painted or generated as a geometric substitute.
+    let neckMask=null;
+    if(landmarks)neckMask=buildNeckMask(seg,landmarks);
+    if(neckMask){
+      const n=makeLayer("Neck","neck",seg,neckMask);if(n)layers.push(n);
+    }
+
+    // Remove accidental overlaps from later facial layers by leaving the original
+    // head mask intact beneath them. This keeps the preview visually identical at t=0;
+    // independent transforms become obvious only after a part is moved.
+    if(layers.length<4){
+      throw new Error("The body-part model did not detect enough usable parts. No fake geometry was created.");
+    }
+
+    // Reorder in a practical back-to-front animation order.
+    const order=[
+      "Hair","Left Foot","Right Foot","Left Lower Leg","Right Lower Leg",
+      "Left Upper Leg","Right Upper Leg","Left Upper Arm","Right Upper Arm",
+      "Left Forearm","Right Forearm","Left Hand","Right Hand","Torso","Neck",
+      "Head / Face","Left Brow","Right Brow","Left Eye","Right Eye","Mouth"
+    ];
+    layers.sort((a,b)=>{
+      const ai=order.indexOf(a.name),bi=order.indexOf(b.name);
+      return (ai<0?100:ai)-(bi<0?100:bi);
+    });
+
+    const group={
+      id:crypto.randomUUID(),
+      name:"Character",
+      collapsed:true,
+      childIds:layers.map(l=>l.id)
+    };
+    state.project.groups=[group];
+    for(const l of layers)l.parentGroupId=group.id;
+
+    state.project.layers=layers;
+    state.project.__selectedType="group";
+    state.project.__selectedId=group.id;
+    pushHistory();
+
+    view="separated";
+    renderAll();
+    setStatus(`Separated ${layers.length} parts`,"ok");
+    toast(`${layers.length} original-pixel layers created. Tap Ungroup to expose them.`);
+  }catch(e){
+    console.error(e);
+    setStatus("Trace failed","err");
+    toast(e?.message||"Could not separate the image.");
+  }finally{
+    UI.trace.disabled=false;UI.stageTrace.disabled=false;
+  }
+}
+
+function fillForLayer(l){
+  return l.maskDataUrl;
+}
+
+function renderVector(){
+  const svg=UI.svg;
+  svg.innerHTML="";
+  if(!sourceDataUrl)return;
+
+  const W=state.project.canvas.width,H=state.project.canvas.height;
+  svg.setAttribute("viewBox",`0 0 ${W} ${H}`);
+
+  const defs=document.createElementNS("http://www.w3.org/2000/svg","defs");
+
+  const sourceImg=document.createElementNS("http://www.w3.org/2000/svg","image");
+  sourceImg.id="source-image";
+  sourceImg.setAttribute("href",sourceDataUrl);
+  sourceImg.setAttribute("x","0");sourceImg.setAttribute("y","0");
+  sourceImg.setAttribute("width",String(W));sourceImg.setAttribute("height",String(H));
+  sourceImg.setAttribute("preserveAspectRatio","none");
+
+  defs.appendChild(sourceImg);
+
+  for(const l of state.project.layers){
+    const mask=document.createElementNS("http://www.w3.org/2000/svg","mask");
+    mask.id="mask-"+l.id;
+    mask.setAttribute("maskUnits","userSpaceOnUse");
+    mask.setAttribute("x","0");mask.setAttribute("y","0");
+    mask.setAttribute("width",String(W));mask.setAttribute("height",String(H));
+
+    const mi=document.createElementNS("http://www.w3.org/2000/svg","image");
+    mi.setAttribute("href",l.maskDataUrl);
+    mi.setAttribute("x","0");mi.setAttribute("y","0");
+    mi.setAttribute("width",String(W));mi.setAttribute("height",String(H));
+    mi.setAttribute("preserveAspectRatio","none");
+    mask.appendChild(mi);defs.appendChild(mask);
+  }
+  svg.appendChild(defs);
+
+  for(const l of state.project.layers){
+    if(!l.visible)continue;
+    const g=document.createElementNS("http://www.w3.org/2000/svg","g");
+    g.setAttribute("data-layer-id",l.id);
+    g.setAttribute("data-layer-name",l.name);
+    g.setAttribute("transform",
+      `translate(${fmt(l.transform.x)} ${fmt(l.transform.y)}) `+
+      `rotate(${fmt(l.transform.rotation)} ${fmt(W/2)} ${fmt(H/2)}) `+
+      `translate(${fmt((1-l.transform.scale)*W/2)} ${fmt((1-l.transform.scale)*H/2)}) `+
+      `scale(${fmt(l.transform.scale)})`
+    );
+    g.setAttribute("opacity",String(clamp(l.transform.opacity,0,1)));
+    g.style.pointerEvents="auto";
+
+    const use=document.createElementNS("http://www.w3.org/2000/svg","use");
+    use.setAttribute("href","#source-image");
+    use.setAttribute("mask",`url(#mask-${l.id})`);
+    use.setAttribute("pointer-events","visiblePainted");
+
+    if(state.project.__selectedType==="layer"&&state.project.__selectedId===l.id){
+      g.setAttribute("filter","url(#selected-shadow)");
+    }
+
+    g.appendChild(use);
+    svg.appendChild(g);
+  }
+
+  // A subtle selected-layer outline using the mask itself. It is only an editor
+  // affordance and does not alter exported output.
+  const selected=selectedLayer();
+  if(selected){
+    const outline=document.createElementNS("http://www.w3.org/2000/svg","rect");
+    outline.setAttribute("x","1");outline.setAttribute("y","1");
+    outline.setAttribute("width",String(Math.max(1,W-2)));
+    outline.setAttribute("height",String(Math.max(1,H-2)));
+    outline.setAttribute("fill","none");
+    outline.setAttribute("stroke","rgba(202,255,98,.0)");
+    svg.appendChild(outline);
+  }
+}
+
+function renderLayers(){
+  UI.layerList.innerHTML="";
+  const group=state.project.groups[0];
+  const grouped=!!group&&state.project.layers.some(l=>l.parentGroupId===group.id);
+
+  if(grouped){
+    const row=document.createElement("div");
+    row.className="row group"+(state.project.__selectedType==="group"?" selected":"");
+    row.onclick=()=>{selectGroup(group.id);renderAll()};
+    row.innerHTML=
+      `<div class="swatch" style="display:grid;place-items:center;color:#caff62;background:#1b1d26">▣</div>
+       <div><div class="row-title">Character <span class="badge">${group.childIds.length} PARTS</span></div>
+       <div class="row-sub">GROUP · UNGROUP TO ANIMATE</div></div>
+       <button class="eye on">›</button>`;
+    UI.layerList.appendChild(row);
+    return;
+  }
+
+  if(!state.project.layers.length){
+    UI.layerList.innerHTML=`<div class="help">No parts yet. Upload an image and run Separate Parts.</div>`;
+    return;
+  }
+
+  for(let i=state.project.layers.length-1;i>=0;i--){
+    const l=state.project.layers[i];
+    const row=document.createElement("div");
+    row.className="row"+(state.project.__selectedType==="layer"&&state.project.__selectedId===l.id?" selected":"");
+    row.onclick=()=>{selectLayer(l.id);renderAll()};
+    row.innerHTML=
+      `<div class="swatch" style="background:linear-gradient(135deg,#23252d,#15171d)">✦</div>
+       <div><div class="row-title">${esc(l.name)}</div><div class="row-sub">${l.detectedPixels.toLocaleString()} pixels</div></div>
+       <button class="eye ${l.visible?"on":""}">${l.visible?"◉":"○"}</button>`;
+    row.querySelector(".eye").onclick=e=>{
+      e.stopPropagation();l.visible=!l.visible;pushHistory();renderAll();
+    };
+    UI.layerList.appendChild(row);
+  }
+}
+
+function renderGroupPanel(){
+  const group=state.project.groups[0];
+  const grouped=!!group&&state.project.layers.some(l=>l.parentGroupId===group.id);
+
+  if(state.project.__selectedType==="group"||grouped){
+    UI.groupPanel.classList.remove("hidden");UI.partPanel.classList.add("hidden");
+    const count=group?.childIds?.length||state.project.layers.length;
+    UI.selectedName.textContent=group?.name||"Character Group";
+    UI.selectedSub.textContent=`GROUP · ${count} PARTS`;
+    UI.detected.textContent=String(count);
+    UI.selPill.textContent=`CHARACTER · ${count} PARTS`;
+    UI.track.textContent=`Character Group · ${count} parts`;
+
+    UI.groupParts.innerHTML="";
+    const names=(group?.childIds||state.project.layers.map(l=>l.id))
+      .map(id=>state.project.layers.find(l=>l.id===id)).filter(Boolean);
+    names.forEach(l=>{
+      const div=document.createElement("div");
+      div.style.cssText="display:flex;align-items:center;gap:6px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:8px";
+      div.innerHTML=`<span style="width:7px;height:7px;border-radius:3px;background:var(--accent)"></span>${esc(l.name)}<span style="margin-left:auto;color:var(--dim)">${l.detectedPixels.toLocaleString()}</span>`;
+      UI.groupParts.appendChild(div);
+    });
+    return;
+  }
+
+  UI.groupPanel.classList.add("hidden");UI.partPanel.classList.remove("hidden");
+}
+
+function renderPartPanel(){
+  const l=selectedLayer();
+  if(!l)return;
+  UI.partTitle.textContent=l.name;
+  UI.partCopy.textContent=`${l.detectedPixels.toLocaleString()} original image pixels are attached to this layer.`;
+
+  UI.x.value=String(l.transform.x);UI.xVal.textContent=Math.round(l.transform.x);
+  UI.y.value=String(l.transform.y);UI.yVal.textContent=Math.round(l.transform.y);
+  UI.r.value=String(l.transform.rotation);UI.rVal.textContent=Math.round(l.transform.rotation)+"°";
+  UI.scale.value=String(l.transform.scale);UI.scaleVal.textContent=Math.round(l.transform.scale*100)+"%";
+  UI.opacity.value=String(l.transform.opacity);UI.opVal.textContent=Math.round(l.transform.opacity*100)+"%";
+}
+
+function renderTimeline(){
+  const frame=state.project.currentFrame,total=state.project.durationFrames;
+  UI.timeline.max=String(total);UI.timeline.value=String(frame);
+  const ms=Math.round(frame/state.project.fps*1000);
+  const sec=Math.floor(ms/1000),rem=ms%1000,min=Math.floor(sec/60),ss=sec%60;
+  UI.time.textContent=`${String(min).padStart(2,"0")}:${String(ss).padStart(2,"0")}:${String(rem).padStart(3,"0")}`;
+  setStyle(UI.playhead,"left",`${total?frame/total*100:0}%`);
+}
+
+function renderStage(){
+  UI.stage.classList.toggle("empty",!sourceImage&&!state.project.layers.length);
+  UI.stage.classList.toggle("original",view==="original");
+  setStyle(UI.vectorSvg,"transform",`scale(${zoom})`);
+  setStyle(UI.originalCanvas,"transform",`scale(${zoom})`);
+  UI.zoomLabel.textContent=Math.round(zoom*100)+"%";
+  UI.modePill.textContent=view==="original"?"ORIGINAL":"SEPARATED";
+  document.querySelectorAll(".stage-btn[data-view]").forEach(b=>b.classList.toggle("active",b.dataset.view===view));
+}
+
+function renderAll(){
+  renderLayers();
+  renderGroupPanel();
+  renderPartPanel();
+  renderTimeline();
+  renderStage();
+  renderVector();
+}
+
+function ungroup(){
+  const group=state.project.groups[0];
+  if(!group)return;
+  for(const l of state.project.layers)if(l.parentGroupId===group.id)l.parentGroupId=null;
+  state.project.groups=[];
+  selectLayer(state.project.layers.at(-1)?.id||null);
+  pushHistory();renderAll();
+  toast("Ungrouped. Every detected body part is now an independent layer.");
+}
+
+UI.ungroup.onclick=ungroup;
+UI.ungroupSide.onclick=ungroup;
+
+UI.deleteSide.onclick=()=>{
+  const l=selectedLayer();if(!l)return;
+  state.project.layers=state.project.layers.filter(x=>x.id!==l.id);
+  state.project.groups=[];
+  selectLayer(state.project.layers.at(-1)?.id||null);
+  pushHistory();renderAll();
+};
+
+function bindTransform(input,handler,valueEl,format){
+  input.oninput=()=>{
+    const l=selectedLayer();if(!l)return;
+    handler(l,Number(input.value));valueEl.textContent=format(Number(input.value));renderVector();
+  };
+  input.onchange=pushHistory;
+}
+bindTransform(UI.x,(l,v)=>l.transform.x=v,UI.xVal,v=>Math.round(v));
+bindTransform(UI.y,(l,v)=>l.transform.y=v,UI.yVal,v=>Math.round(v));
+bindTransform(UI.r,(l,v)=>l.transform.rotation=v,UI.rVal,v=>Math.round(v)+"°");
+bindTransform(UI.scale,(l,v)=>l.transform.scale=v,UI.scaleVal,v=>Math.round(v*100)+"%");
+bindTransform(UI.opacity,(l,v)=>l.transform.opacity=v,UI.opVal,v=>Math.round(v*100)+"%");
+
+UI.timeline.oninput=()=>{
+  state.project.currentFrame=Number(UI.timeline.value);
+  renderTimeline();
+};
+
+UI.prev.onclick=()=>{
+  state.project.currentFrame=clamp(state.project.currentFrame-1,0,state.project.durationFrames);
+  renderTimeline();
+};
+UI.next.onclick=()=>{
+  state.project.currentFrame=clamp(state.project.currentFrame+1,0,state.project.durationFrames);
+  renderTimeline();
+};
+UI.play.onclick=()=>{
+  playing=!playing;UI.play.textContent=playing?"Ⅱ":"▶";
+  if(playing){playLast=performance.now();requestAnimationFrame(playLoop)}
+};
+function playLoop(now){
+  if(!playing)return;
+  const frameMs=1000/state.project.fps;
+  if(now-playLast>=frameMs){
+    state.project.currentFrame++;
+    if(state.project.currentFrame>state.project.durationFrames)state.project.currentFrame=0;
+    playLast=now;renderTimeline();
+  }
+  requestAnimationFrame(playLoop);
+}
+
+UI.title.oninput=()=>{state.project.metadata.title=UI.title.value||"Untitled Character"};
+UI.title.onchange=pushHistory;
+
+function pickFile(){
+  if(!UI.file){
+    toast("File picker is unavailable in this browser.");
+    return;
+  }
+  try{
+    UI.file.click();
+  }catch(e){
+    console.error(e);
+    toast("Could not open the image picker.");
+  }
+}
+UI.choose.onclick=pickFile;
+UI.upload.onclick=pickFile;
+UI.stageTrace.onclick=traceParts;
+
+UI.file.onchange=async()=>{
+  const f=UI.file.files?.[0];
+  UI.file.value="";
+  if(!f)return;
+  try{
+    await loadImage(f);
+  }catch(e){
+    console.error("Image load error:",e);
+    setStatus("Upload failed","err");
+    toast(e?.message||"Could not load image.");
+  }
+};
+
+["dragover","dragenter"].forEach(ev=>document.addEventListener(ev,e=>{
+  e.preventDefault();setStyle(UI.dropBox,"borderColor","rgba(202,255,98,.8)");
+}));
+["dragleave","drop"].forEach(ev=>document.addEventListener(ev,e=>{
+  e.preventDefault();setStyle(UI.dropBox,"borderColor","");
+}));
+document.addEventListener("drop",async e=>{
+  const f=e.dataTransfer?.files?.[0];if(!f)return;
+  try{await loadImage(f)}catch(err){setStatus("Upload rejected","err");toast(err.message||"Could not load image.")}
+});
+
+document.querySelectorAll(".stage-btn[data-view]").forEach(btn=>btn.onclick=()=>{
+  view=btn.dataset.view;renderStage();
+});
+document.querySelector('[data-action="fit"]').onclick=()=>{zoom=1;renderStage()};
+UI.zoomIn.onclick=()=>{zoom=clamp(zoom+.1,.5,2);renderStage()};
+UI.zoomOut.onclick=()=>{zoom=clamp(zoom-.1,.5,2);renderStage()};
+
+document.querySelectorAll(".dock button").forEach(btn=>btn.onclick=()=>{
+  const mode=btn.dataset.mode;
+  if(mode==="trace"){if(sourceImage)traceParts();return}
+  if(mode==="export"){openExport();return}
+  document.querySelectorAll(".dock button").forEach(b=>b.classList.toggle("active",b===btn));
+  if(window.innerWidth<=860)openSheet(mode==="layers"?"layers":mode==="pose"?"pose":"style");
+});
+
+function openSheet(which){
+  activeSheet=which;
+  UI.sheetTitle.textContent=which==="layers"?"Layers":which==="pose"?"Pose":"Style";
+  renderSheet(which);UI.sheet.classList.add("show");
+}
+function closeSheet(){UI.sheet.classList.remove("show")}
+UI.closeSheet.onclick=closeSheet;
+UI.sheet.onclick=e=>{if(e.target===UI.sheet)closeSheet()};
+
+function renderSheet(which){
+  UI.sheetBody.innerHTML="";
+  if(which==="layers"){
+    const wrap=document.createElement("div");
+    if(state.project.groups.length&&state.project.__selectedType==="group"){
+      const b=document.createElement("button");b.className="btn primary";b.style.cssText="width:100%;margin-bottom:8px;height:38px";
+      b.textContent="UNGROUP · SHOW PARTS";b.onclick=()=>{ungroup();closeSheet()};
+      wrap.appendChild(b);
+    }
+    state.project.layers.slice().reverse().forEach(l=>{
+      const row=document.createElement("div");row.className="row";
+      row.innerHTML=`<div class="swatch"></div><div><div class="row-title">${esc(l.name)}</div><div class="row-sub">${l.detectedPixels.toLocaleString()} pixels</div></div>`;
+      row.onclick=()=>{selectLayer(l.id);renderAll();closeSheet()};
+      wrap.appendChild(row);
+    });
+    UI.sheetBody.appendChild(wrap);return;
+  }
+
+  if(which==="pose"){
+    const l=selectedLayer();
+    const wrap=document.createElement("div");
+    if(!l){
+      wrap.innerHTML=`<div class="help">Ungroup the Character first, then select a body part.</div>`;
+    }else{
+      wrap.innerHTML=
+        `<div class="action">
+          <div class="action-title">${esc(l.name)}</div>
+          <div class="field"><div class="field-head"><span class="field-label">Rotation</span><span class="value" id="sheetRotVal">${Math.round(l.transform.rotation)}°</span></div>
+          <input id="sheetRot" type="range" min="-180" max="180" value="${l.transform.rotation}"></div>
+          <div class="field"><div class="field-head"><span class="field-label">X</span><span class="value" id="sheetXVal">${Math.round(l.transform.x)}</span></div>
+          <input id="sheetX" type="range" min="-500" max="500" value="${l.transform.x}"></div>
+          <div class="field"><div class="field-head"><span class="field-label">Y</span><span class="value" id="sheetYVal">${Math.round(l.transform.y)}</span></div>
+          <input id="sheetY" type="range" min="-500" max="500" value="${l.transform.y}"></div>
+        </div>`;
+      wrap.querySelector("#sheetRot").oninput=e=>{l.transform.rotation=Number(e.target.value);wrap.querySelector("#sheetRotVal").textContent=Math.round(l.transform.rotation)+"°";renderVector()};
+      wrap.querySelector("#sheetX").oninput=e=>{l.transform.x=Number(e.target.value);wrap.querySelector("#sheetXVal").textContent=Math.round(l.transform.x);renderVector()};
+      wrap.querySelector("#sheetY").oninput=e=>{l.transform.y=Number(e.target.value);wrap.querySelector("#sheetYVal").textContent=Math.round(l.transform.y);renderVector()};
+    }
+    UI.sheetBody.appendChild(wrap);return;
+  }
+
+  const wrap=document.createElement("div");wrap.style.paddingBottom="20px";
+  wrap.innerHTML=`<div class="action">
+    <div class="action-title">Pixel-preserved layers</div>
+    <div class="action-copy">Style controls are intentionally minimal here because changing the artwork's pixels would defeat the point of the source-preserving split.</div>
+  </div>`;
+  UI.sheetBody.appendChild(wrap);
+}
+
+function openExport(){
+  const grouped=state.project.groups.length>0;
+  UI.exportIssues.innerHTML=grouped
+    ? `<div class="issue"><b>Character group preserved</b><div>The HVP contains the collapsed group and all of its independent child layers.</div></div>`
+    : `<div class="issue"><b>Ungrouped project</b><div>All body-part layers are already exposed independently.</div></div>`;
+  UI.modal.classList.add("show");
+}
+UI.export.onclick=openExport;UI.closeExport.onclick=()=>UI.modal.classList.remove("show");UI.closeExport2.onclick=()=>UI.modal.classList.remove("show");
+UI.modal.onclick=e=>{if(e.target===UI.modal)UI.modal.classList.remove("show")};
+
+function generateSvg(){
+  const W=state.project.canvas.width,H=state.project.canvas.height;
+  const parts=[
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`,
+    `<title>${esc(state.project.metadata.title)}</title>`,
+    `<defs>`,
+    `<image id="source" href="${esc(sourceDataUrl)}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none"/>`
+  ];
+
+  for(const l of state.project.layers){
+    parts.push(
+      `<mask id="mask-${esc(l.id)}" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}">`,
+      `<image href="${esc(l.maskDataUrl)}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none"/>`,
+      `</mask>`
+    );
+  }
+  parts.push(`</defs>`);
+
+  if(state.project.groups.length){
+    const g=state.project.groups[0];
+    parts.push(`<g id="group-${esc(g.id)}" data-group="Character">`);
+  }
+
+  for(const l of state.project.layers){
+    if(!l.visible)continue;
+    parts.push(
+      `<g id="layer-${esc(l.id)}" data-layer="${esc(l.name)}" `+
+      `transform="translate(${fmt(l.transform.x)} ${fmt(l.transform.y)}) rotate(${fmt(l.transform.rotation)} ${fmt(W/2)} ${fmt(H/2)}) `+
+      `translate(${fmt((1-l.transform.scale)*W/2)} ${fmt((1-l.transform.scale)*H/2)}) scale(${fmt(l.transform.scale)})" opacity="${fmt(l.transform.opacity)}">`,
+      `<use href="#source" mask="url(#mask-${esc(l.id)})"/>`,
+      `</g>`
+    );
+  }
+
+  if(state.project.groups.length)parts.push(`</g>`);
+  parts.push(`</svg>`);
+  return parts.join("\n");
+}
+
+UI.exportSvg.onclick=()=>{
+  if(!sourceDataUrl){toast("Upload an image first.");return}
+  download(new Blob([generateSvg()],{type:"image/svg+xml;charset=utf-8"}),safeName(state.project.metadata.title)+".svg");
+  toast("Pixel-preserved separated SVG exported.");
+};
+
+async function exportHvp(){
+  if(!window.JSZip){toast("ZIP library unavailable.");return}
+  setStatus("Packaging HVP…","busy");
+  try{
+    const zip=new JSZip();
+    const p=clone(state.project);delete p.__selectedType;delete p.__selectedId;
+    p.sourceDataUrl=sourceDataUrl;
+    zip.file("manifest.json",JSON.stringify({
+      format:"HVP",version:CONFIG.version,application:"Vector Puppet",applicationVersion:CONFIG.appVersion,
+      entry:"project.json",note:"Source image is preserved and each body-part layer references its own mask."
+    },null,2));
+    zip.file("project.json",JSON.stringify(p,null,2));
+    zip.file("exports/current.svg",generateSvg());
+    if(sourceBlob)zip.file(`assets/source.${sourceBlob.type==="image/png"?"png":sourceBlob.type==="image/webp"?"webp":"jpg"}`,await sourceBlob.arrayBuffer());
+    for(const l of state.project.layers){
+      const base=l.name.replace(/[^a-z0-9]+/gi,"-").toLowerCase();
+      const bytes=await (await fetch(l.maskDataUrl)).blob();
+      zip.file(`masks/${base}-${l.id}.png`,bytes);
+    }
+    const blob=await zip.generateAsync({type:"blob",compression:"DEFLATE",compressionOptions:{level:6}});
+    download(blob,safeName(state.project.metadata.title)+".hvp");
+    setStatus("HVP exported","ok");toast("Editable HVP exported.");
+  }catch(e){
+    console.error(e);setStatus("HVP export failed","err");toast(e.message||"HVP export failed.");
+  }
+}
+UI.exportHvp.onclick=exportHvp;
+
+function generateAmXml(){
+  const W=state.project.canvas.width,H=state.project.canvas.height;
+  const end=Math.round(state.project.durationFrames/state.project.fps*1000);
+  const lines=[
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<scene title="${esc(state.project.metadata.title)}" width="${W}" height="${H}" exportWidth="${W}" exportHeight="${H}" totalTime="${end}" fps="${state.project.fps}" amver="106" ffver="101" am="com.alightcreative.motion/5.x" amplatform="android">`
+  ];
+  let id=1;
+  for(const l of state.project.layers){
+    lines.push(
+      `<shape id="${id++}" label="${esc(l.name)}" startTime="0" endTime="${end}" fillType="image-mask">`,
+      `<transform><location value="${fmt(l.transform.x)},${fmt(l.transform.y)}"/><scale value="${fmt(l.transform.scale)},${fmt(l.transform.scale)}"/><rotation value="${fmt(l.transform.rotation)}"/><opacity value="${fmt(l.transform.opacity)}"/></transform>`,
+      `<sourceImage href="${esc(sourceDataUrl)}"/>`,
+      `<maskImage href="${esc(l.maskDataUrl)}"/>`,
+      `</shape>`
+    );
+  }
+  lines.push(`</scene>`);
+  return lines.join("\n");
+}
+UI.exportXml.onclick=()=>{
+  const xml=generateAmXml();
+  UI.exportIssues.innerHTML=
+    `<div class="issue"><b>⚠ Best-effort XML</b><div>Body-part separation is real, but the exact Alight Motion image-mask XML schema is proprietary/version-dependent. Test the generated file in your target AM version.</div></div>`;
+  download(new Blob([xml],{type:"application/xml;charset=utf-8"}),safeName(state.project.metadata.title)+"-alight.xml");
+  toast("XML exported with compatibility warning.");
+};
+
+UI.open.onclick=()=>{
+  const input=document.createElement("input");input.type="file";input.accept=".hvp";
+  input.onchange=async()=>{
+    const f=input.files?.[0];if(!f)return;
+    try{
+      if(!window.JSZip)throw new Error("ZIP library unavailable.");
+      const zip=await JSZip.loadAsync(f);
+      const pj=zip.file("project.json");if(!pj)throw new Error("Invalid HVP.");
+      const p=JSON.parse(await pj.async("text"));
+      if(!p.canvas||!Array.isArray(p.layers))throw new Error("Invalid project structure.");
+      state.project=p;
+      sourceDataUrl=p.sourceDataUrl||"";
+      if(sourceDataUrl){
+        const img=new Image();img.src=sourceDataUrl;await img.decode();sourceImage=img;
+        UI.originalCanvas.width=img.naturalWidth;UI.originalCanvas.height=img.naturalHeight;
+        UI.originalCanvas.getContext("2d").drawImage(img,0,0);
+      }
+      state.project.__selectedType=state.project.groups?.length?"group":"layer";
+      state.project.__selectedId=state.project.groups?.[0]?.id||state.project.layers?.[0]?.id||null;
+      UI.stage.classList.remove("empty");view=state.project.layers.length?"separated":"original";renderAll();
+      toast("HVP loaded.");setStatus("Project loaded","ok");
+    }catch(e){console.error(e);setStatus("Open failed","err");toast(e.message||"Could not open HVP.")}
+  };
+  input.click();
+};
+
+window.addEventListener("keydown",e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="z"&&historyIndex>0){
+    e.preventDefault();historyIndex--;restoreHistory(history[historyIndex]);
+  }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="y"&&historyIndex<history.length-1){
+    e.preventDefault();historyIndex++;restoreHistory(history[historyIndex]);
+  }
+});
+
+window.addEventListener("error",e=>{
+  console.error(e.error||e.message);
+  if(e?.error?.message || e?.message){
+    setStatus("Runtime error","err");
+    toast(e.error?.message || e.message);
+  }
+});
+
+seedInitial();
+
+function seedInitial(){
+  if(!window.tf || !window.bodyPix){
+    setStatus("AI ready when you tap Separate Parts","busy");
+  }else{
+    setStatus("Ready");
+  }
+  renderAll();
+}
+
+})();
+</script>
+</body>
+</html>
